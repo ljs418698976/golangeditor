@@ -25,6 +25,9 @@ frontend/*.local
 *.swo
 *~
 
+# Go
+go1.25.6.windows-amd64/
+
 # OS
 .DS_Store
 Thumbs.db
