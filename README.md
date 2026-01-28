@@ -17,9 +17,11 @@
 
 ### 前置要求
 
-1. **安装 Go** (如果系统中没有 Go)
-   - 下载: https://golang.org/dl/
-   - 或使用便携版 Go,在设置中配置 GOROOT
+1. **准备 Go 环境 (便携模式)**
+   - 下载 Go 的 ZIP 压缩包 (例如: `go1.25.6.windows-amd64.zip`)
+   - **将压缩包解压到当前项目根目录下** (例如: `D:\code\golangeditor\go1.25.6.windows-amd64`)
+   - **修改构建脚本**: 打开 `build.bat`，将其中的 Go 命令路径修改为解压后的 `go.exe` 完整路径
+     - 示例: `"D:\code\golangeditor\go1.25.6.windows-amd64\go\bin\go.exe"`
 
 2. **安装 Node.js** (仅用于开发构建)
    - 下载: https://nodejs.org/
@@ -38,7 +40,7 @@ npm run build
 
 ```bash
 # 使用完整的 Go 路径构建 (GUI 模式,无控制台窗口)
-"D:\MStoreDownload\go1.25.6.windows-amd64\go\bin\go.exe" build -ldflags="-H windowsgui" -o GoFastEditor.exe .
+"D:\code\golangeditor\go1.25.6.windows-amd64\go\bin\go.exe" build -ldflags="-H windowsgui" -o GoFastEditor.exe .
 
 # 或者如果 Go 已添加到 PATH
 go build -ldflags="-H windowsgui" -o GoFastEditor.exe .
@@ -59,7 +61,7 @@ go build -ldflags="-H windowsgui" -o GoFastEditor.exe .
 **方式 2: 使用 go run (开发模式)**
 ```bash
 # 直接运行,无需编译
-"D:\MStoreDownload\go1.25.6.windows-amd64\go\bin\go.exe" run main.go
+"D:\code\golangeditor\go1.25.6.windows-amd64\go\bin\go.exe" run main.go
 
 # 或使用快速启动脚本
 .\start.bat
@@ -216,7 +218,7 @@ cd frontend
 npm run dev
 
 # 终端 2: 启动后端服务器
-"D:\MStoreDownload\go1.25.6.windows-amd64\go\bin\go.exe" run main.go
+"D:\code\golangeditor\go1.25.6.windows-amd64\go\bin\go.exe" run main.go
 # 或使用脚本
 .\dev.bat
 ```
@@ -233,7 +235,7 @@ npm run build
 
 # 2. 构建可执行文件 (GUI 模式)
 cd ..
-"D:\MStoreDownload\go1.25.6.windows-amd64\go\bin\go.exe" build -ldflags="-H windowsgui" -o GoFastEditor.exe .
+"D:\code\golangeditor\go1.25.6.windows-amd64\go\bin\go.exe" build -ldflags="-H windowsgui" -o GoFastEditor.exe .
 # 或使用脚本
 .\build.bat
 

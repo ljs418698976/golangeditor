@@ -28,7 +28,7 @@ cd ..
 
 echo.
 echo [2/3] Building Go Backend...
-"D:\MStoreDownload\go1.25.6.windows-amd64\go\bin\go.exe" build -ldflags="-H windowsgui" -o GoFastEditor.exe .
+"D:\code\golangeditor\go1.25.6.windows-amd64\go\bin\go.exe" build -ldflags="-H windowsgui" -o GoFastEditor.exe .
 if errorlevel 1 (
     echo Error: Go build failed
     echo Please make sure Go is installed correctly

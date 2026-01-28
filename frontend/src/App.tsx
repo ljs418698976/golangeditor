@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Editor, { type OnMount, loader } from '@monaco-editor/react';
 import axios from 'axios';
 import { Play, Settings, Code, Info, X, Save, FileText, Layers, PanelLeft, PanelBottom, PanelRight } from 'lucide-react';
@@ -20,6 +20,30 @@ interface EnvConfig {
 // By default, @monaco-editor/react uses a CDN. 
 // We should import monaco directly to bundle it.
 import * as monaco from 'monaco-editor';
+import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
+import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
+import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker';
+import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker';
+
+self.MonacoEnvironment = {
+  getWorker(_, label) {
+    if (label === 'json') {
+      return new jsonWorker();
+    }
+    if (label === 'css' || label === 'scss' || label === 'less') {
+      return new cssWorker();
+    }
+    if (label === 'html' || label === 'handlebars' || label === 'razor') {
+      return new htmlWorker();
+    }
+    if (label === 'typescript' || label === 'javascript') {
+      return new tsWorker();
+    }
+    return new editorWorker();
+  },
+};
+
 loader.config({ monaco });
 
 
@@ -60,6 +84,9 @@ function App() {
   const [isBottomVisible, setIsBottomVisible] = useState(true);
   const [isEditorVisible, setIsEditorVisible] = useState(true);
 
+  const editorRef = useRef<any>(null);
+  const pendingJumpRef = useRef<{ path: string; selection: any } | null>(null);
+
   useEffect(() => {
     localStorage.setItem('go_editor_config', JSON.stringify(config));
   }, [config]);
@@ -73,20 +100,47 @@ function App() {
     return () => window.removeEventListener('beforeunload', handleUnload);
   }, []);
 
+  // Handle pending jumps (e.g. from Go to Definition across files)
+  useEffect(() => {
+    if (pendingJumpRef.current && currentFile) {
+      const { path, selection } = pendingJumpRef.current;
+      const normalize = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+
+      // Check if we are now in the target file
+      if (normalize(path) === normalize(currentFile)) {
+        // use setTimeout to ensure Editor component has time to switch models
+        setTimeout(() => {
+          if (editorRef.current) {
+            const editor = editorRef.current;
+            editor.revealRangeInCenterIfOutsideViewport(selection);
+            editor.setPosition({
+              lineNumber: selection.startLineNumber,
+              column: selection.startColumn
+            });
+            editor.focus();
+            console.log('[App] Applied pending jump to', selection);
+          }
+        }, 100);
+        pendingJumpRef.current = null;
+      }
+    }
+  }, [currentFile]);
+
   const handleEditorDidMount: OnMount = (editor, monaco) => {
     console.log('[App] Editor mounted successfully');
+    editorRef.current = editor;
 
     // Register a custom command to open files
-    const openFileCommandId = editor.addCommand(0, (_ctx: any, path: string) => {
+    editor.addCommand(0, (_ctx: any, path: string) => {
       handleFileSelect(path);
     });
 
     // Register Editor Opener to handle custom URI schemes
-    // Note: registerEditorOpener is an internal API, so we use any
     const openerService = (editor as any)._openerService;
     if (openerService) {
       const originalOpen = openerService.open.bind(openerService);
       openerService.open = async (resource: any, options: any) => {
+        // Handle 'open-file' custom scheme (from links)
         if (resource && resource.scheme === 'open-file') {
           const importPath = resource.path;
           const currentPath = editor.getModel()?.uri.fsPath;
@@ -104,27 +158,59 @@ function App() {
             }
           }
         }
+
+        // Handle 'file' scheme (from Go to Definition)
+        if (resource && resource.scheme === 'file') {
+          const targetPath = resource.fsPath;
+          const currentPath = editor.getModel()?.uri.fsPath;
+
+          // Same file check
+          if (currentPath && targetPath.toLowerCase() === currentPath.toLowerCase()) {
+            if (options && options.selection) {
+              const range = options.selection;
+              editor.revealRangeInCenterIfOutsideViewport(range);
+              editor.setPosition({
+                lineNumber: range.startLineNumber,
+                column: range.startColumn
+              });
+              return true;
+            }
+            return originalOpen(resource, options);
+          }
+
+          // Different file
+          console.log(`[Editor] Jumping to file: ${targetPath}`);
+
+          // Store the selection to be applied after file load
+          if (options && options.selection) {
+            pendingJumpRef.current = {
+              path: targetPath,
+              selection: options.selection
+            };
+          }
+
+          await handleFileSelect(targetPath);
+          return true;
+        }
+
         return originalOpen(resource, options);
       };
     }
 
-    // Register Link Provider for all languages
+    // Link Provider (unchanged) works well
     monaco.languages.registerLinkProvider('*', {
       provideLinks: (model) => {
         const links: any[] = [];
         const lines = model.getLinesContent();
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
-          // Match paths in quotes: strings starting with @/ or . or containing /
           const re = /["'](@\/[^"']+)["']|["'](\.\.?[^"']+)["']|["']([^"']+\/[^"']+)["']/g;
           let match;
           while ((match = re.exec(line)) !== null) {
             const pathStr = match[1] || match[2] || match[3];
-            if (!pathStr) continue;
-
+            if (!pathStr || pathStr.startsWith('http')) continue; // Skip urls
             const startColumn = match.index + 2;
             const endColumn = startColumn + pathStr.length;
-
             links.push({
               range: new monaco.Range(i + 1, startColumn, i + 1, endColumn),
               url: monaco.Uri.parse(`open-file:${pathStr}`).toString()
@@ -135,7 +221,123 @@ function App() {
       }
     });
 
-    // Register Definition Provider (Ctrl+Click)
+    // Content Provider explicitly REMOVED as it is not supported in monaco-editor standalone
+    // We handle model loading manually in provideDefinition
+
+
+    // Sync React state when model changes (e.g. after Go To Definition navigation)
+    editor.onDidChangeModel((e) => {
+      const model = editor.getModel();
+      if (model) {
+        const newPath = model.uri.fsPath;
+        console.log('[Editor] Model changed to:', newPath);
+
+        const normalizePath = (p: string) => p.replace(/\\/g, '/');
+
+        // We need to update currentFile so the UI reflects the change
+        // But we must avoid re-triggering a reload loop
+        setCurrentFile(prev => {
+          if (!prev) return normalizePath(newPath);
+
+          if (normalizePath(prev) !== normalizePath(newPath)) {
+            // Update valid file path
+            return normalizePath(newPath);
+          }
+          return prev;
+        });
+        // Also update code to current model content to keep React in sync
+        setCode(model.getValue());
+      }
+    });
+
+    // Symbol Cache & Refresh Logic
+    let symbolCache: any[] = [];
+    const refreshSymbols = async () => {
+      try {
+        const resp = await axios.get('http://localhost:8080/api/symbols');
+        if (Array.isArray(resp.data)) {
+          symbolCache = resp.data;
+          console.log(`[App] Loaded ${symbolCache.length} symbols`);
+        }
+      } catch (e) {
+        console.error("Failed to load symbols", e);
+      }
+    };
+    refreshSymbols();
+    // Use window.setInterval to avoid TS issues if any
+    window.setInterval(refreshSymbols, 10000);
+
+    monaco.languages.registerDefinitionProvider('go', {
+      provideDefinition: async (model, position) => {
+        const word = model.getWordAtPosition(position);
+        if (!word) return null;
+
+        console.log(`[DefProvider] Lookup: ${word.word}`);
+
+        // Normalization helper
+        const normalize = (p: string) => p.replace(/\\/g, '/').toLowerCase();
+
+        const currentFsPath = model.uri.fsPath;
+        const currentFsPathNorm = normalize(currentFsPath);
+        const currentDirNorm = currentFsPathNorm.substring(0, currentFsPathNorm.lastIndexOf('/'));
+
+        // Smart Search
+        const candidates = symbolCache.filter(s => s.name === word.word);
+        console.log(`[DefProvider] Found ${candidates.length} candidates for ${word.word}`, candidates);
+
+        if (candidates.length === 0) return null;
+
+        // 1. Exact match in current file
+        // 2. Match in same directory
+        // 3. Match anywhere
+        // Priority to "Function" or "Method" if strict, but ignoring for now
+        let target = candidates.find(s => normalize(s.path) === currentFsPathNorm) ||
+          candidates.find(s => normalize(s.path).startsWith(currentDirNorm)) ||
+          candidates[0];
+
+        console.log(`[DefProvider] Selected target:`, target);
+
+        if (target) {
+          console.log(`[DefProvider] Target found:`, target);
+          let uri = monaco.Uri.file(target.path);
+
+          // If target is current file, use exact current model URI
+          if (normalize(target.path) === currentFsPathNorm) {
+            uri = model.uri;
+          } else {
+            // CRITICAL: Pre-load model for the target file
+            // Monaco standalone requires the model to exist in memory to jump to it.
+            // We check if it exists, if not, we fetch and create it.
+            if (!monaco.editor.getModel(uri)) {
+              try {
+                console.log(`[DefProvider] Lazily loading content for: ${target.path}`);
+                const resp = await axios.get('http://localhost:8080/api/fs/read', {
+                  params: { path: target.path }
+                });
+                if (resp.data) {
+                  // Double check existence to avoid race conditions
+                  if (!monaco.editor.getModel(uri)) {
+                    monaco.editor.createModel(resp.data.content || '', 'go', uri);
+                    console.log(`[DefProvider] Model created for: ${target.path}`);
+                  }
+                }
+              } catch (e) {
+                console.error("[DefProvider] Failed to load file content:", target.path, e);
+                // If loading fails, we still return the location, hoping maybe the user can handle it (or it fails gracefully)
+              }
+            }
+          }
+
+          return {
+            uri: uri,
+            range: new monaco.Range(target.line, target.character, target.line, target.character + word.word.length)
+          };
+        }
+        return null;
+      }
+    });
+
+    // Register Generic Path Definition Provider
     monaco.languages.registerDefinitionProvider('*', {
       provideDefinition: async (model, position) => {
         const line = model.getLineContent(position.lineNumber);
@@ -146,6 +348,7 @@ function App() {
           const end = start + match[1].length + 1;
           if (position.column >= start && position.column <= end) {
             const pathStr = match[1];
+            if (pathStr.startsWith('http')) return null; // Ignore URLs
             if (pathStr.includes('/') || pathStr.startsWith('.')) {
               return {
                 uri: monaco.Uri.parse(`open-file:${pathStr}`),
@@ -158,7 +361,7 @@ function App() {
       }
     });
 
-    // Go specific completions
+    // Register Go Completions
     monaco.languages.registerCompletionItemProvider('go', {
       provideCompletionItems: (model, position) => {
         const suggestions = [
@@ -209,7 +412,7 @@ function App() {
       if (resp.data && typeof resp.data.content === 'string') {
         const content = resp.data.content;
         // Important: Set current file first so Editor key updates
-        setCurrentFile(path);
+        setCurrentFile(path.replace(/\\/g, '/'));
         // Then set code
         setCode(content);
         setConsoleOutput(`Loaded: ${path} (${content.length} chars)`);
@@ -246,6 +449,7 @@ function App() {
     try {
       const response = await axios.post('http://localhost:8080/api/run', {
         code,
+        path: currentFile,
         env: config
       });
       if (response.data.error) {
@@ -317,7 +521,7 @@ function App() {
           {currentFile && (
             <div className="flex items-center gap-2 ml-4 px-3 py-1 bg-[#0f111a] rounded-lg border border-[#334155]">
               <FileText size={14} className="text-gray-400" />
-              <span className="text-xs text-gray-300">{currentFile.split('\\').pop()}</span>
+              <span className="text-xs text-gray-300">{currentFile.replace(/\\/g, '/').split('/').pop()}</span>
             </div>
           )}
         </div>
